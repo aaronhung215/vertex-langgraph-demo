@@ -8,6 +8,7 @@ block1/customer_transactions.csv
 # Future block artifacts (FAISS index, model caches, etc.)
 block*/faiss_index*
 block*/*.bin
+block*/doc_meta.jsonl
 block*/__pycache__/
 
 # Python
