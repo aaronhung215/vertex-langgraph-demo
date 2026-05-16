@@ -1,0 +1,37 @@
+# Private cross-Claude sync notes (job-search strategy, calibrated facts, tracker)
+# DO NOT COMMIT — see CLAUDE.md WHAT NOT TO DO section
+_sync/
+
+# Generated synthetic data (regen on demand from 01_generate_data.py)
+block1/customer_transactions.csv
+
+# Future block artifacts (FAISS index, model caches, compiled binaries, etc.)
+block*/faiss_index*
+block*/*.bin
+block*/doc_meta.jsonl
+block*/__pycache__/
+block4/risk-tool
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.venv/
+venv/
+env/
+
+# Secrets / credentials
+.env
+.env.*
+*.key
+*.pem
+service-account*.json
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log
