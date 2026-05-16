@@ -31,6 +31,7 @@ import numpy as np
 from google import genai
 from google.genai import types as gtypes
 from langgraph.graph import END, START, StateGraph
+from langsmith import traceable
 from sentence_transformers import SentenceTransformer
 
 # Local import: the BQ tool from step 1 sits next to this file.
@@ -114,7 +115,11 @@ def _llm() -> genai.Client:
     return _client
 
 
+@traceable(run_type="llm", name=f"gemini-2.5-flash")
 def _gen(prompt: str, *, json_mode: bool = False, max_tokens: int = 600) -> str:
+    """Single LLM call. Wrapped with @traceable so each call appears as its
+    own span in LangSmith when LANGSMITH_TRACING=true. No-op when the env var
+    is unset (traceable becomes a passthrough)."""
     cfg = gtypes.GenerateContentConfig(
         temperature=0.1,
         max_output_tokens=max_tokens,
