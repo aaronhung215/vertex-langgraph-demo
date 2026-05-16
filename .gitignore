@@ -5,11 +5,12 @@ _sync/
 # Generated synthetic data (regen on demand from 01_generate_data.py)
 block1/customer_transactions.csv
 
-# Future block artifacts (FAISS index, model caches, etc.)
+# Future block artifacts (FAISS index, model caches, compiled binaries, etc.)
 block*/faiss_index*
 block*/*.bin
 block*/doc_meta.jsonl
 block*/__pycache__/
+block4/risk-tool
 
 # Python
 __pycache__/
