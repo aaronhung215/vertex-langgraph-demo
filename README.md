@@ -5,7 +5,7 @@
 
 | | |
 |---|---|
-| **Status** | Blocks 1–4 of 6 shipped (foundation → RAG → LangGraph agent → Go MCP tool). Block 5 (Cloud Run + LangSmith) and Block 6 polish in progress |
+| **Status** | Blocks 1–4 + Block 5a (LangSmith observability) + Block 6 (README polish) shipped. Block 5b (Cloud Run deploy) deferred per plan's cut order |
 | **Cumulative LLM spend** | ~USD 0.02 across all demo runs (gemini-2.5-flash, ~20 calls) |
 | **Reproducibility** | `git clone` → 4 `pip install`s + 1 `brew install go` → 4 `python` runs. Total wall-clock for a fresh machine: ~30 min including model download |
 
@@ -172,6 +172,7 @@ brew install go                                       # for Block 4
 pip install faker pandas google-cloud-bigquery \
             google-cloud-aiplatform sentence-transformers \
             faiss-cpu langgraph langchain-core mcp \
+            langsmith \
             --break-system-packages
 
 # GCP project (or substitute your own; budget alert at USD 5 recommended)
@@ -197,6 +198,17 @@ python block3/02_agent.py             # → 3 e2e queries + "BLOCK 3 COMPLETE �
 cd block4 && go build -o risk-tool .
 python demo_client.py                 # → 3 risk decisions + "BLOCK 4 COMPLETE ✅"
 ```
+
+### Optional: enable LangSmith tracing (Block 5a)
+
+```bash
+export LANGSMITH_API_KEY="lsv2_pt_..."           # from https://smith.langchain.com
+export LANGSMITH_TRACING=true
+export LANGSMITH_PROJECT=fintech-agent-demo
+python block3/02_agent.py
+```
+
+Now every agent run uploads a structured trace tree to LangSmith with per-node latency, prompts, and token counts. The decorator (`@traceable` on `_gen()` in `block3/02_agent.py`) is a no-op when these env vars are unset — local-only runs remain free.
 
 ---
 
@@ -227,10 +239,34 @@ Each block's README has its own execution guide, design rationale, and "what thi
 
 ---
 
-## What's next
+## Block 5a — Observability via LangSmith
 
-- **Block 5** — Containerise the Block 3 agent with Docker, deploy to Cloud Run, add LangSmith for token-cost-per-trace observability. Demonstrates the deployment + observability story the JD asks for
-- **Block 6** _(this README is part of it)_ — top-level polish, Mermaid diagram, cross-stack comparison
+Each agent run is auto-instrumented for tracing. Setting three env vars (see "Optional: enable LangSmith tracing" above) makes every node + LLM call surface in the LangSmith UI:
+
+```
+chain   5.49s  LangGraph                  ← root span (one query)
+  chain   1.33s  planner                  ← LangGraph auto-traced node
+    llm   1.33s  gemini-2.5-flash         ← @traceable on _gen()
+  chain   0.13s  retriever                ← parallel branch — FAISS, local
+  chain   1.95s  bq_executor              ← parallel branch — BigQuery, slower
+  chain   1.52s  synthesizer
+    llm   1.52s  gemini-2.5-flash
+  chain   0.69s  reflection
+    llm   0.68s  gemini-2.5-flash
+```
+
+The trace tree gives three things at a glance:
+1. **Where time goes** — `bq_executor` (1.95s, network) vs `retriever` (0.13s, local FAISS) shows the parallel-branch latency win
+2. **Where tokens go** — synthesizer is the heaviest LLM call by output tokens; planner and reflection are cheap routing/check calls
+3. **Where failures would land** — each node is its own span, so a tool error or a JSON-parse failure shows up at the node boundary, not as an opaque agent crash
+
+`@traceable` on `_gen()` is a passthrough when `LANGSMITH_TRACING` is unset, so local-only runs stay free and offline.
+
+---
+
+## What's deferred
+
+- **Block 5b** — Containerise the agent with Docker + deploy to Cloud Run. Plan put this after LangSmith in the cut order; LangSmith proves the observability story without needing a public URL recruiter likely wouldn't click anyway. Will revisit for the Google Cloud AI Engineer submission
 
 ---
 
