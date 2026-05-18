@@ -15,7 +15,8 @@ are execution guides. Anything about **how the system works** lives here.
 7. [Tool safety model](#7-tool-safety-model)
 8. [Observability layer](#8-observability-layer)
 9. [Design decisions](#9-design-decisions)
-10. [Known limitations & deferred work](#10-known-limitations--deferred-work)
+10. [Evaluation layer](#10-evaluation-layer)
+11. [Known limitations & deferred work](#11-known-limitations--deferred-work)
 
 ---
 
@@ -37,6 +38,11 @@ Four physical components, one per build block:
 All four pieces share **one domain** (NP credit risk: new buyer · Q1–Q4 ·
 merchant segment travel/gaming/retail · JCIC fallback) so the demo tells
 one coherent story, not four toy scripts.
+
+**On top of the agent**: an offline evaluation pipeline (`eval/`) scores
+the agent against a 20-question fixed testset on four standard Ragas
+metrics — faithfulness, answer_relevancy, context_precision,
+context_recall. See [§ 10](#10-evaluation-layer).
 
 ---
 
@@ -358,7 +364,83 @@ free and offline.
 
 ---
 
-## 10. Known limitations & deferred work
+## 10. Evaluation layer
+
+Lives in `eval/`. Two-stage pipeline that scores Block 3 agent output
+against a 20-question fixed testset using Ragas metrics. Detailed
+execution guide in [`eval/README.md`](./eval/README.md); this section
+covers the architecture-level shape.
+
+### Pipeline
+
+```
+eval/testset.jsonl             ← 20 hand-authored cases (rag_only / bq_only / both)
+        │
+        ▼
+eval/01_run_agent.py           ← runs Block 3 LangGraph 20 times
+        │                       (imports build_graph from block3/02_agent.py)
+        ▼
+eval/run_outputs.jsonl         ← cached (question, answer, contexts, plan, reflection)
+        │
+        ▼
+eval/02_score_ragas.py         ← Ragas judges with gemini-2.5-flash
+        │                       (faithfulness / answer_relevancy /
+        │                        context_precision / context_recall)
+        ▼
+eval/scores.csv                ← per-question scores
+eval/scores_aggregate.json     ← overall + per-tool-path slices
+```
+
+### Why two stages
+
+Agent runs hit Vertex AI + BigQuery and cost real time + money.
+Cache them once in `run_outputs.jsonl`; iterate on scoring (try a new
+metric, change the judge, recompute aggregates) without re-paying for
+agent runs.
+
+### Testset construction
+
+20 questions split across the three tool paths the planner can pick:
+
+| Path | n | Purpose |
+|---|---|---|
+| `rag_only` | 6 | Pure policy / dict / playbook lookup — exercises retriever + synthesizer |
+| `bq_only` | 6 | Pure aggregation — exercises bq_executor; retriever skipped |
+| `both` | 8 | The headline analytical questions — exercises full fan-out + synthesis with mixed citations |
+
+Each row carries `expected_doc_ids` and a hand-authored `ground_truth`
+derived directly from `block2/corpus.jsonl`, so Ragas's
+context_recall has something concrete to compare against.
+
+### Why Ragas (and not a hand-rolled scorer)
+
+- **Standard vocabulary** — "faithfulness 0.87" is immediately
+  readable to anyone in the LLM-eval ecosystem; a custom metric needs
+  explanation each time
+- **Standard methodology** — claim-decomposition for faithfulness,
+  question-regeneration for relevancy are documented patterns with
+  published validations
+- **One-line metric additions** — `answer_correctness`,
+  `context_entity_recall`, `semantic_similarity` etc. add as one
+  metric-list entry
+
+Trade-off worth naming: the Ragas LLM judge introduces its own noise.
+Absolute scores are a sanity floor; the real value is in **comparing
+versions** (before/after a prompt tweak, before/after a retrieval
+change) where the same judge applies the same noise to both.
+
+### Known artifact: BQ-only context metrics
+
+For `bq_only` questions the retriever is skipped, so the only
+"context" passed to the judge is the formatted BQ aggregate table.
+context_precision/recall are not designed to score that — they assume
+retrieved documents. The aggregate report flags this as a per-path
+slice (see `scores_aggregate.json`); faithfulness and
+answer_relevancy remain meaningful for all 20 questions.
+
+---
+
+## 11. Known limitations & deferred work
 
 ### Reflection false positive on Q3
 
