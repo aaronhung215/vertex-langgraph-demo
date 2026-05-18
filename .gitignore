@@ -12,6 +12,11 @@ block*/doc_meta.jsonl
 block*/__pycache__/
 block4/risk-tool
 
+# Eval pipeline generated artifacts (regen with eval/01_run_agent.py + 02_score_ragas.py)
+eval/run_outputs.jsonl
+eval/scores.csv
+eval/scores_aggregate.json
+
 # Python
 __pycache__/
 *.py[cod]

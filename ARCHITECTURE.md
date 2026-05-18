@@ -15,7 +15,8 @@ are execution guides. Anything about **how the system works** lives here.
 7. [Tool safety model](#7-tool-safety-model)
 8. [Observability layer](#8-observability-layer)
 9. [Design decisions](#9-design-decisions)
-10. [Known limitations & deferred work](#10-known-limitations--deferred-work)
+10. [Evaluation layer](#10-evaluation-layer)
+11. [Known limitations & deferred work](#11-known-limitations--deferred-work)
 
 ---
 
@@ -37,6 +38,11 @@ Four physical components, one per build block:
 All four pieces share **one domain** (NP credit risk: new buyer · Q1–Q4 ·
 merchant segment travel/gaming/retail · JCIC fallback) so the demo tells
 one coherent story, not four toy scripts.
+
+**On top of the agent**: an offline evaluation pipeline (`eval/`) scores
+the agent against a 20-question fixed testset on four standard Ragas
+metrics — faithfulness, answer_relevancy, context_precision,
+context_recall. See [§ 10](#10-evaluation-layer).
 
 ---
 
@@ -358,7 +364,120 @@ free and offline.
 
 ---
 
-## 10. Known limitations & deferred work
+## 10. Evaluation layer
+
+Lives in `eval/`. Two-stage pipeline that scores Block 3 agent output
+against a 20-question fixed testset using Ragas metrics. Detailed
+execution guide in [`eval/README.md`](./eval/README.md); this section
+covers the architecture-level shape.
+
+### Pipeline
+
+```
+eval/testset.jsonl             ← 20 hand-authored cases (rag_only / bq_only / both)
+        │
+        ▼
+eval/01_run_agent.py           ← runs Block 3 LangGraph 20 times
+        │                       (imports build_graph from block3/02_agent.py)
+        ▼
+eval/run_outputs.jsonl         ← cached (question, answer, contexts, plan, reflection)
+        │
+        ▼
+eval/02_score_ragas.py         ← Ragas judges with gemini-2.5-flash
+        │                       (faithfulness / answer_relevancy /
+        │                        context_precision / context_recall)
+        ▼
+eval/scores.csv                ← per-question scores
+eval/scores_aggregate.json     ← overall + per-tool-path slices
+```
+
+### Why two stages
+
+Agent runs hit Vertex AI + BigQuery and cost real time + money.
+Cache them once in `run_outputs.jsonl`; iterate on scoring (try a new
+metric, change the judge, recompute aggregates) without re-paying for
+agent runs.
+
+### Testset construction
+
+20 questions split across the three tool paths the planner can pick:
+
+| Path | n | Purpose |
+|---|---|---|
+| `rag_only` | 6 | Pure policy / dict / playbook lookup — exercises retriever + synthesizer |
+| `bq_only` | 6 | Pure aggregation — exercises bq_executor; retriever skipped |
+| `both` | 8 | The headline analytical questions — exercises full fan-out + synthesis with mixed citations |
+
+Each row carries `expected_doc_ids` and a hand-authored `ground_truth`
+derived directly from `block2/corpus.jsonl`, so Ragas's
+context_recall has something concrete to compare against.
+
+### Why Ragas (and not a hand-rolled scorer)
+
+- **Standard vocabulary** — "faithfulness 0.87" is immediately
+  readable to anyone in the LLM-eval ecosystem; a custom metric needs
+  explanation each time
+- **Standard methodology** — claim-decomposition for faithfulness,
+  question-regeneration for relevancy are documented patterns with
+  published validations
+- **One-line metric additions** — `answer_correctness`,
+  `context_entity_recall`, `semantic_similarity` etc. add as one
+  metric-list entry
+
+Trade-off worth naming: the Ragas LLM judge introduces its own noise.
+Absolute scores are a sanity floor; the real value is in **comparing
+versions** (before/after a prompt tweak, before/after a retrieval
+change) where the same judge applies the same noise to both.
+
+### Known artifact: BQ-only context metrics
+
+For `bq_only` questions the retriever is skipped, so the only
+"context" passed to the judge is the formatted BQ aggregate table.
+context_precision/recall are not designed to score that — they assume
+retrieved documents. The aggregate report flags this as a per-path
+slice (see `scores_aggregate.json`); faithfulness and
+answer_relevancy remain meaningful for all 20 questions.
+
+### First-run results (2026-05-18)
+
+| Metric | All (n=20) | rag_only (6) | bq_only (6) | both (8) |
+|---|---|---|---|---|
+| faithfulness | 0.832 | 0.967 | 0.833 | 0.729 |
+| answer_relevancy | 0.730 | 0.864 | 0.883 | **0.515** |
+| context_precision | 0.857 | 0.972 | 0.833 | 0.788 |
+| context_recall | 0.423 | 0.328 | 0.250 | 0.625 |
+
+**Real planner regression surfaced** (5 of 20 cases): the planner
+sometimes emits `filters: {is_delinquent: True}` — but `is_delinquent`
+is the outcome the BQ tool aggregates, not a dimension in
+`ALLOWED_DIMS`. The BQ tool correctly raises `ToolInputError`; the
+agent falls back to "insufficient evidence" or doc-only answers, and
+Ragas scores those low. Fix: tighten the planner prompt at
+`block3/02_agent.py:135` to call out that `is_delinquent` is the
+outcome (not a filter dimension). Tracked as a follow-up; out of
+scope for the eval addition itself.
+
+**Judge artifacts** (separate from the above): several `rag_only`
+cases have `context_recall ≈ 0` despite `faithfulness = 1.0` and
+`context_precision = 1.0` — the agent retrieved the right doc and
+grounded its answer, but the Ragas judge appears to parse
+`(per policy-001)` in the ground_truth as its own atomic claim and
+look for a literal doc-id string in the contexts. Persistent
+"LLM returned 1 generations instead of requested 3" warnings add
+extra noise (Vertex returns one generation per call; Ragas wants
+self-consistency n=3).
+
+The eval pipeline is doing its job: low scores on the `both` path
+point at a fixable agent bug, while the `rag_only`
+`context_recall = 0.328` is mostly judge-side noise that would benefit
+from a multi-judge or self-consistency upgrade rather than an agent
+change. Full per-question detail in `eval/scores.csv` and
+`eval/run_outputs.jsonl` (both gitignored — regen with the two scripts
+in `eval/`).
+
+---
+
+## 11. Known limitations & deferred work
 
 ### Reflection false positive on Q3
 
