@@ -26,60 +26,17 @@ The synthetic FinTech domain (new vs returning buyer, Q1–Q4, merchant segments
 
 ## Architecture
 
-```mermaid
-flowchart TB
-    classDef block1 fill:#e3f2fd,stroke:#1976d2,color:#0d47a1
-    classDef block2 fill:#f3e5f5,stroke:#7b1fa2,color:#4a148c
-    classDef block3 fill:#fff3e0,stroke:#f57c00,color:#e65100
-    classDef block4 fill:#e8f5e9,stroke:#388e3c,color:#1b5e20
+End-to-end shape: one analyst question → planner routes to RAG and/or
+BigQuery → tools run in parallel → grounded synthesis → reflection
+self-check → answer with citations. Four physical components
+(BigQuery · FAISS · Python LangGraph · Go MCP tool) all share one
+FinTech credit-risk domain so the demo tells one coherent story.
 
-    User([Analyst question])
-
-    subgraph Block1["Block 1 — GCP foundation"]
-        BQ[(BigQuery<br/>customer_transactions<br/>10K rows)]
-    end
-
-    subgraph Block2["Block 2 — RAG layer"]
-        Corpus[corpus.jsonl<br/>15 policy / dict / playbook docs]
-        Index[(FAISS index<br/>all-MiniLM-L6-v2 · 384-dim)]
-        Corpus --> Index
-    end
-
-    subgraph Block3["Block 3 — LangGraph agent (Python)"]
-        Planner{{Planner<br/>JSON routing}}
-        Retriever[Retriever node]
-        BQExec[BQ executor<br/>allowlist + bound params]
-        Synth[Synthesizer<br/>cites doc-ids]
-        Reflect[Reflection<br/>self-check]
-        Planner -->|use_rag| Retriever
-        Planner -->|use_bq| BQExec
-        Retriever --> Synth
-        BQExec --> Synth
-        Synth --> Reflect
-    end
-
-    subgraph Block4["Block 4 — Go MCP tool"]
-        GoBin[risk-tool<br/>Go binary]
-        RiskFn[ScoreRisk<br/>rule-based scorer]
-        GoBin --> RiskFn
-    end
-
-    User --> Planner
-    Retriever -.reads.-> Index
-    BQExec -.queries.-> BQ
-    RiskFn -.rules derived from.-> Corpus
-    Reflect --> Answer([Grounded answer + citations])
-
-    class Block1 block1
-    class Block2 block2
-    class Block3 block3
-    class Block4 block4
-```
-
-The dotted edges are the **cross-block reuse story**:
-- Block 3's retriever reads Block 2's FAISS index directly (`../block2/faiss_index.bin`)
-- Block 3's BQ executor queries Block 1's BigQuery table
-- Block 4's Go rules trace line-for-line to Block 2's corpus docs (policy-001, policy-003, playbook-004 …) — same source of truth, different language
+**Full architecture, state graph, AgentState schema, per-node
+responsibilities, cross-block data flow, tool safety model, and design
+decisions live in [`ARCHITECTURE.md`](./ARCHITECTURE.md)** — that's the
+single source of truth. This README keeps the recruiter pitch
+(walkthrough, stack choices, cross-stack comparison, run-it-yourself).
 
 ---
 
@@ -241,26 +198,18 @@ Each block's README has its own execution guide, design rationale, and "what thi
 
 ## Block 5a — Observability via LangSmith
 
-Each agent run is auto-instrumented for tracing. Setting three env vars (see "Optional: enable LangSmith tracing" above) makes every node + LLM call surface in the LangSmith UI:
+Each agent run is auto-instrumented for tracing — every LangGraph node
+and every Gemini call surface as a structured trace tree in the
+LangSmith UI when three env vars are set (see "Optional: enable
+LangSmith tracing" above). The trace tree makes parallel-branch
+latency, per-LLM-call token cost, and node-level failure boundaries
+visible at a glance.
 
-```
-chain   5.49s  LangGraph                  ← root span (one query)
-  chain   1.33s  planner                  ← LangGraph auto-traced node
-    llm   1.33s  gemini-2.5-flash         ← @traceable on _gen()
-  chain   0.13s  retriever                ← parallel branch — FAISS, local
-  chain   1.95s  bq_executor              ← parallel branch — BigQuery, slower
-  chain   1.52s  synthesizer
-    llm   1.52s  gemini-2.5-flash
-  chain   0.69s  reflection
-    llm   0.68s  gemini-2.5-flash
-```
+`@traceable` on `_gen()` is a passthrough when `LANGSMITH_TRACING` is
+unset, so local-only runs stay free and offline.
 
-The trace tree gives three things at a glance:
-1. **Where time goes** — `bq_executor` (1.95s, network) vs `retriever` (0.13s, local FAISS) shows the parallel-branch latency win
-2. **Where tokens go** — synthesizer is the heaviest LLM call by output tokens; planner and reflection are cheap routing/check calls
-3. **Where failures would land** — each node is its own span, so a tool error or a JSON-parse failure shows up at the node boundary, not as an opaque agent crash
-
-`@traceable` on `_gen()` is a passthrough when `LANGSMITH_TRACING` is unset, so local-only runs stay free and offline.
+Full trace-tree example and the two-layer instrumentation explanation
+are in [`ARCHITECTURE.md` § 8](./ARCHITECTURE.md#8-observability-layer).
 
 ---
 

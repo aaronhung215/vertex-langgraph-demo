@@ -37,58 +37,26 @@ python 02_agent.py              # 3 e2e queries through the LangGraph
 
 ---
 
-## State graph
+## State graph & design choices
 
-```
-START
-  │
-  ▼
-┌──────────┐  emits JSON: {use_rag, use_bq, bq_args, reasoning}
-│ planner  │  (gemini-2.5-flash, response_mime_type=application/json)
-└──────────┘
-  │
-  ├──────────────────────┐         ← fan out (parallel)
-  ▼                      ▼
-┌───────────┐    ┌──────────────┐
-│ retriever │    │ bq_executor  │  ← BigQuery via parameterised SQL,
-│ (FAISS)   │    │ (allowlisted │     allowlisted dimensions/filters
-└───────────┘    └──────────────┘
-  │                      │
-  └──────────┬───────────┘         ← fan in (synthesizer waits for both)
-             ▼
-        ┌──────────────┐
-        │ synthesizer  │  citations: [doc-id] + "(per the data table)"
-        └──────────────┘
-             │
-             ▼
-        ┌──────────────┐
-        │ reflection   │  self-check; outputs "OK" or one-line fix
-        └──────────────┘
-             │
-             ▼
-            END
-```
+The full state graph (with fan-out / fan-in mechanics), the `AgentState`
+schema, per-node responsibilities, and the design-decision table are
+documented in [`../ARCHITECTURE.md`](../ARCHITECTURE.md) — the
+repo-level single source of truth. Sections most relevant to Block 3:
 
-Three test queries trigger three different paths:
+- [§ 3 Agent state graph](../ARCHITECTURE.md#3-agent-state-graph)
+- [§ 4 AgentState schema](../ARCHITECTURE.md#4-agentstate-schema)
+- [§ 5 Per-node responsibilities](../ARCHITECTURE.md#5-per-node-responsibilities)
+- [§ 7 Tool safety model](../ARCHITECTURE.md#7-tool-safety-model) (BQ allowlist + parameter binding)
+- [§ 9 Design decisions](../ARCHITECTURE.md#9-design-decisions)
+
+The three demo queries triggering three different tool paths:
 
 | # | Question | use_rag | use_bq |
 |---|---|---|---|
 | 1 | "What's our target unpaid rate, and how is is_delinquent defined?" | ✅ | ❌ |
 | 2 | "Show me delinquency rate broken down by quarter." | ❌ | ✅ |
 | 3 | "Q3 new-buyer delinquency feels high. What does the data show, and what's our SOP?" | ✅ | ✅ |
-
----
-
-## Design choices
-
-| Choice | Why |
-|---|---|
-| **LangGraph with plain-Python nodes** (no LangChain ChatModel) | Demonstrates the orchestration pattern without dragging in LangChain's full ecosystem. Each node is a small `(state) -> dict` function — easy to read, easy to unit-test |
-| **Planner returns structured JSON** (`response_mime_type=application/json`) | Deterministic routing; planner cannot emit malformed instructions that break downstream nodes |
-| **Parallel fan-out** for retriever + bq_executor | Both are independent given the plan. LangGraph merges the resulting state automatically. Measurable latency win when both tools are needed |
-| **BQ tool: allowlist + query parameters** | The LLM could be prompt-injected into emitting hostile filter values. Allowlist + `ScalarQueryParameter` makes the worst case "zero rows returned", never SQL injection. `01_bq_tool.py` includes an explicit injection test |
-| **Reflection is no-loop** | Just transparency — prints `OK` or one-line critique. A retry loop adds complexity and risks divergence; out of scope for a 16-hr demo |
-| **`thinking_budget=0` on all calls** | Routing / synthesis / reflection are simple enough not to need 2.5-flash's hidden reasoning. Saves cost and avoids the token-budget-eaten-by-thinking bug seen in Block 2 |
 
 ---
 
