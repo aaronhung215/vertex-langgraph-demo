@@ -438,6 +438,43 @@ retrieved documents. The aggregate report flags this as a per-path
 slice (see `scores_aggregate.json`); faithfulness and
 answer_relevancy remain meaningful for all 20 questions.
 
+### First-run results (2026-05-18)
+
+| Metric | All (n=20) | rag_only (6) | bq_only (6) | both (8) |
+|---|---|---|---|---|
+| faithfulness | 0.832 | 0.967 | 0.833 | 0.729 |
+| answer_relevancy | 0.730 | 0.864 | 0.883 | **0.515** |
+| context_precision | 0.857 | 0.972 | 0.833 | 0.788 |
+| context_recall | 0.423 | 0.328 | 0.250 | 0.625 |
+
+**Real planner regression surfaced** (5 of 20 cases): the planner
+sometimes emits `filters: {is_delinquent: True}` — but `is_delinquent`
+is the outcome the BQ tool aggregates, not a dimension in
+`ALLOWED_DIMS`. The BQ tool correctly raises `ToolInputError`; the
+agent falls back to "insufficient evidence" or doc-only answers, and
+Ragas scores those low. Fix: tighten the planner prompt at
+`block3/02_agent.py:135` to call out that `is_delinquent` is the
+outcome (not a filter dimension). Tracked as a follow-up; out of
+scope for the eval addition itself.
+
+**Judge artifacts** (separate from the above): several `rag_only`
+cases have `context_recall ≈ 0` despite `faithfulness = 1.0` and
+`context_precision = 1.0` — the agent retrieved the right doc and
+grounded its answer, but the Ragas judge appears to parse
+`(per policy-001)` in the ground_truth as its own atomic claim and
+look for a literal doc-id string in the contexts. Persistent
+"LLM returned 1 generations instead of requested 3" warnings add
+extra noise (Vertex returns one generation per call; Ragas wants
+self-consistency n=3).
+
+The eval pipeline is doing its job: low scores on the `both` path
+point at a fixable agent bug, while the `rag_only`
+`context_recall = 0.328` is mostly judge-side noise that would benefit
+from a multi-judge or self-consistency upgrade rather than an agent
+change. Full per-question detail in `eval/scores.csv` and
+`eval/run_outputs.jsonl` (both gitignored — regen with the two scripts
+in `eval/`).
+
 ---
 
 ## 11. Known limitations & deferred work

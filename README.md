@@ -25,8 +25,11 @@ The synthetic FinTech domain (new vs returning buyer, Q1–Q4, merchant segments
 On top of the agent, an offline **Ragas eval pipeline** (`eval/`) scores
 agent output against a 20-question fixed testset on faithfulness,
 answer_relevancy, context_precision, and context_recall — closes the JD
-"evaluation pipelines" expectation with code, not a claim. See
-[`eval/README.md`](./eval/README.md) and [`ARCHITECTURE.md` § 10](./ARCHITECTURE.md#10-evaluation-layer).
+"evaluation pipelines" expectation with code, not a claim. **First run
+on the checked-in code** surfaced a real planner regression
+(disallowed-filter bug in 5 of 20 cases) alongside meaningful judge
+artifacts; full breakdown in [`eval/README.md`](./eval/README.md) and
+[`ARCHITECTURE.md` § 10](./ARCHITECTURE.md#10-evaluation-layer).
 
 ---
 

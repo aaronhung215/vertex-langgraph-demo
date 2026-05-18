@@ -88,33 +88,72 @@ recall analysis.
 
 ---
 
-## How to interpret the output
+## First-run results (2026-05-18)
 
-After running step 2, `scores.csv` has one row per question with all
-four metric scores and the per-question retrieved contexts (Ragas
-includes the raw inputs in `to_pandas()`). `scores_aggregate.json` has
-overall means plus per-path slices.
+| Metric | All (n=20) | rag_only (n=6) | bq_only (n=6) | both (n=8) |
+|---|---|---|---|---|
+| faithfulness | 0.832 | 0.967 | 0.833 | 0.729 |
+| answer_relevancy | 0.730 | 0.864 | 0.883 | **0.515** |
+| context_precision | 0.857 | 0.972 | 0.833 | 0.788 |
+| context_recall | 0.423 | 0.328 | 0.250 | 0.625 |
 
-**Expected ballpark** (rough, since this hasn't been run on the
-checked-in code at the time of writing):
+Wall-clock: ~108s (agent runs) + ~92s (Ragas judging). Cost: ~USD 0.04.
 
-- `faithfulness` should be high (>0.85) for `rag_only` and `both` — the
-  agent's prompts explicitly require `[doc-id]` citations and "(per the
-  data table)" attribution
-- `context_recall` should be high for `rag_only` (FAISS top-3 over a
-  15-doc corpus has a wide net)
-- `context_precision` will be **lower for `bq_only`** by construction —
-  those queries skip the retriever and the BQ table substitutes as a
-  context entry, which the precision metric is not designed for; this
-  is a known artifact, not an agent defect
-- `answer_relevancy` should be consistently high (>0.85) — the planner
-  forces structured routing, so the agent rarely answers off-topic
+### What the eval surfaced — real planner regression
 
-**Per-question debugging**: any score below 0.7 deserves a look. Open
-`scores.csv` and check whether (a) the answer truly misses the ground
-truth, (b) the contexts didn't include the right doc, or (c) the
-Ragas judge itself is being noisy. The third case is real — Ragas
-metrics are themselves LLM judgments and carry uncertainty.
+Five of the eight low-score cases (`Q01`, `Q11`, `Q13`, `Q16`, `Q18`)
+trace to **one planner bug**: the planner sometimes emits
+`filters: {is_delinquent: True}` even though `is_delinquent` is **not**
+in `ALLOWED_DIMS` (it is the outcome computed by the BQ tool, not a
+dimension to filter on). The BQ tool correctly raises
+`ToolInputError: filters contains disallowed keys: ['is_delinquent']`,
+the agent falls back to "insufficient evidence" or doc-only answers,
+and the Ragas judge — correctly — scores those as low-faithfulness or
+low-relevancy.
+
+A secondary bug: `Q18` and parts of `Q01` showed `group_by: []`
+(empty), which the BQ tool also rejects.
+
+This is exactly the kind of regression an eval pipeline is supposed to
+catch. The planner prompt at `block3/02_agent.py:135` should explicitly
+call out that `is_delinquent` is the outcome (not a filter dimension)
+and that `group_by` must be non-empty. Out of scope for the eval
+addition itself; tracked as a follow-up.
+
+### What the eval surfaced — Ragas judge artifacts
+
+Several near-zero `context_recall` scores in `rag_only` (e.g. Q01,
+Q04, Q05) coexist with `faithfulness = 1.0` and
+`context_precision = 1.0`. The agent retrieved the correct doc, the
+answer is fully grounded, but the judge marks the ground_truth as
+unsupported. The most likely cause: the judge parses the
+`(per policy-001)` citation in the ground_truth as its own atomic
+claim and looks for a literal doc-id string in the contexts. This is
+LLM-judge noise, not an agent defect.
+
+The persistent "LLM returned 1 generations instead of requested 3"
+warning during scoring is a related noise source — Ragas wants
+self-consistency voting (n=3) for `answer_relevancy` but Vertex AI
+returns one generation per call by default. The aggregated scores are
+based on a single judge sample per metric, so absolute numbers carry
+more variance than usual.
+
+### How to read the table
+
+- **`rag_only` faithfulness 0.97 and `context_precision` 0.97** is the
+  signal that the grounded-retrieval + cite-doc-id design works as
+  intended on the easy path
+- **`both` answer_relevancy 0.515** is dragged down by Q13/Q16/Q18,
+  which all hit the planner bug above — fix the planner and this
+  number should rebound
+- **`context_recall` low across the board** is a mix of (a) the
+  planner bug (no BQ data → fewer supported claims) and (b) the
+  judge-citation-parsing artifact. Worth re-running after the planner
+  fix to separate the two
+
+**Per-question debugging**: open `scores.csv` and `run_outputs.jsonl`
+together; for any score < 0.7, the per-row plan + answer in
+`run_outputs.jsonl` usually makes the cause obvious.
 
 ---
 
