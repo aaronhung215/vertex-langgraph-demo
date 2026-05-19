@@ -7,7 +7,12 @@ Metrics (all 0-1, higher is better):
     context_precision   — are the retrieved contexts ranked relevance-first?
     context_recall      — did retrieval cover what ground_truth needs?
 
-Judge: gemini-2.5-flash (cheap, same family as the agent itself).
+Judge: gemini-2.5-flash-lite (no thinking by default → predictable
+cost). The first version of this script used gemini-2.5-flash for the
+judge, which defaults thinking ON; that one run cost USD 11+ in
+thinking tokens alone. See eval/README.md "Cost post-mortem" for the
+full breakdown. flash-lite is the cheap, no-surprises judge.
+
 Embeddings: sentence-transformers/all-MiniLM-L6-v2 (same as Block 2 — no
 extra API call, keeps the judge cost bounded to LLM judging only).
 
@@ -77,9 +82,12 @@ def main() -> None:
                          for r in scoreable],
     })
 
-    print(f"Configuring judge: gemini-2.5-flash via Vertex (project={PROJECT_ID})")
+    # gemini-2.5-flash-lite has thinking OFF by default, no thinking_config
+    # plumbing needed. gemini-2.5-flash with thinking ON billed ~25x output
+    # per token in the first run of this pipeline — see eval/README.md.
+    print(f"Configuring judge: gemini-2.5-flash-lite via Vertex (project={PROJECT_ID})")
     judge_llm = ChatVertexAI(
-        model_name="gemini-2.5-flash",
+        model_name="gemini-2.5-flash-lite",
         project=PROJECT_ID,
         location=REGION,
         temperature=0,

@@ -6,7 +6,7 @@
 | | |
 |---|---|
 | **Status** | Blocks 1–4 + Block 5a (LangSmith observability) + Block 6 (README polish) + Eval pipeline (Ragas) shipped. Block 5b (Cloud Run deploy) deferred per plan's cut order |
-| **Cumulative LLM spend** | ~USD 0.02 across all demo runs (gemini-2.5-flash, ~20 calls); +~USD 0.04 per full Ragas eval pass |
+| **Cumulative LLM spend** | ~USD 0.02 for Blocks 1–4 + 5a runs. First eval pass cost USD ~13 (Ragas judge had thinking-on by default — see `eval/README.md` Cost post-mortem); judge switched to `gemini-2.5-flash-lite`, post-fix pass predicted ~USD 0.50, untested |
 | **Reproducibility** | `git clone` → 4 `pip install`s + 1 `brew install go` → 4 `python` runs. Total wall-clock for a fresh machine: ~30 min including model download |
 
 ---
@@ -164,7 +164,10 @@ python block3/02_agent.py             # → 3 e2e queries + "BLOCK 3 COMPLETE �
 cd block4 && go build -o risk-tool .
 python demo_client.py                 # → 3 risk decisions + "BLOCK 4 COMPLETE ✅"
 
-# Eval — Ragas quality measurement (optional, ~USD 0.04 / pass)
+# Eval — Ragas quality measurement
+# Post-fix predicted cost: ~USD 0.50 / pass (judge = gemini-2.5-flash-lite).
+# UNTESTED at the time of writing. Verify with a 3-question sample first.
+# (First-pass run cost USD ~13 — see eval/README.md Cost post-mortem.)
 pip install ragas datasets langchain-google-vertexai langchain-huggingface \
             --break-system-packages
 python eval/01_run_agent.py           # → run_outputs.jsonl (20 cached agent runs)
@@ -207,7 +210,8 @@ Each block's README has its own execution guide, design rationale, and "what thi
 | Block 3: 3 agent runs × ~3 LLM calls each | ~USD 0.01 |
 | Block 4: zero LLM calls (offline Go + Python) | USD 0 |
 | **Demo total** | **~USD 0.02** |
-| Eval pass: 20 agent runs (~100 calls) + Ragas judging (~80 calls) | ~USD 0.04 |
+| Eval pass (first run, judge thinking-on bug) | **USD ~13** — see `eval/README.md` Cost post-mortem |
+| Eval pass (post-fix, judge = `gemini-2.5-flash-lite`) | ~USD 0.50 predicted — **untested**, verify with 3-question sample first |
 
 `gemini-2.5-flash` with `thinking_budget=0` is the cheap, predictable choice. A USD 5 budget alert is set on the project as a tripwire — see `block1/00_SETUP_COMMANDS.md`.
 
