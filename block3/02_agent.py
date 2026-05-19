@@ -154,8 +154,14 @@ Output STRICT JSON only:
   "reasoning": "one short sentence"
 }
 
-bq_args.group_by must be subset of ["quarter","is_new_buyer","merchant_segment","device_type"]
-bq_args.filters keys must be from the same set.
+CONSTRAINTS — do not break these:
+- bq_args.group_by must be a NON-EMPTY subset of
+  ["quarter","is_new_buyer","merchant_segment","device_type"]
+- bq_args.filters keys must come from the same four-dimension set
+- `is_delinquent` is the OUTCOME the BQ tool aggregates into
+  delinquency_pct. NEVER include `is_delinquent` in group_by OR filters
+- When the analyst asks "delinquency rate of X", group_by by X's
+  dimension(s), do NOT filter by is_delinquent
 
 QUESTION: {question}
 """
