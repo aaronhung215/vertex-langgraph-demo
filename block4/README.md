@@ -109,20 +109,31 @@ risk decision is fully auditable back to written policy.
 
 ---
 
-## How Block 3 could integrate this
+## How Block 3 integrates this — DONE
 
-Out of scope for the demo (would re-touch Block 3 code), but worth flagging
-as the natural next step:
+The agent's `risk_executor` node (`block3/02_agent.py:risk_executor`)
+spawns `./risk-tool` per-call over MCP stdio. The planner emits
+`use_risk=true` + `risk_args` when the question is about an individual
+hypothetical applicant; the synthesizer composes the answer combining
+`[doc-id]` citations + BQ aggregates + `(per risk_score)` for the
+risk decision. See `block3/README.md` query #4 for the demo case and
+`ARCHITECTURE.md` § 5 for the per-node spec.
 
-```python
-# In block3/02_agent.py, add a "risk_executor" node alongside bq_executor:
-# Spawn ./block4/risk-tool, expose risk_score to the planner as use_risk=True,
-# and add a fourth conditional branch to the LangGraph fan-out.
+**Cross-language proof point**: a zero-LLM smoke test confirms the
+MCP path standalone (no Gemini credits needed):
+
+```bash
+cd block3 && PROJECT_ID=dummy python -c "
+import sys; sys.path.insert(0, '.')
+from importlib import import_module
+m = import_module('02_agent')
+print(m._call_risk_tool_sync({
+    'merchant_segment': 'travel', 'is_new_buyer': True,
+    'order_value_twd': 25000, 'has_jcic': False,
+}))
+"
+# → {'score': 0.33, 'band': 'medium', 'decision': 'review', 'contributions': [...]}
 ```
-
-The MCP protocol makes this addition mostly mechanical — the schema is
-already discoverable via `tools/list`, so the planner prompt update is the
-only meaningful change.
 
 ---
 

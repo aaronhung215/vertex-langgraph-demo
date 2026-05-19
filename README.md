@@ -18,7 +18,7 @@ The agent answers questions a FinTech risk analyst would actually ask — _"Q3 n
 1. **Grounded retrieval** over a small corpus of credit policies, data-dictionary entries, and risk-ops playbooks (Block 2)
 2. **Aggregations** over a synthetic 10K-row transaction table in BigQuery (Block 1 + 3)
 3. **Tool calling** orchestrated as a LangGraph state machine that decides per-query which tools to invoke and runs them in parallel (Block 3)
-4. **A Go-written MCP tool** that exposes a rule-based credit-risk scorer the agent could call (Block 4) — proves Go + MCP fluency, not just a Python-only stack
+4. **A Go-written MCP tool** that exposes a rule-based credit-risk scorer **routed by the agent's planner** (Block 4 + Block 3 risk_executor node) — cross-language tool call over MCP stdio, not just a parallel Python script. Proves the multi-language agent story end-to-end
 
 The synthetic FinTech domain (new vs returning buyer, Q1–Q4, merchant segments travel/gaming/retail, JCIC fallback) is deliberately the same domain across all four blocks, so the demo tells **one coherent story** rather than four toy scripts.
 
@@ -156,13 +156,14 @@ python block2/01_build_corpus.py      # → corpus.jsonl (15 docs)
 python block2/02_index_faiss.py       # → faiss_index.bin (~5min first run, model download)
 python block2/03_rag_gemini.py        # → 5 grounded Q&A + "BLOCK 2 COMPLETE ✅"
 
-# Block 3 — LangGraph agent
-python block3/01_bq_tool.py           # → BQ tool tests incl. SQL-injection probe
-python block3/02_agent.py             # → 3 e2e queries + "BLOCK 3 COMPLETE ✅"
-
-# Block 4 — Go MCP tool
+# Block 4 — build the Go MCP binary first so Block 3's agent can spawn it
 cd block4 && go build -o risk-tool .
 python demo_client.py                 # → 3 risk decisions + "BLOCK 4 COMPLETE ✅"
+cd ..
+
+# Block 3 — LangGraph agent (now routes to all three tools)
+python block3/01_bq_tool.py           # → BQ tool tests incl. SQL-injection probe
+python block3/02_agent.py             # → 4 e2e queries (RAG / BQ / RAG+BQ / all-three) + "BLOCK 3 COMPLETE ✅"
 
 # Eval — Ragas quality measurement
 # Post-fix predicted cost: ~USD 0.50 / pass (judge = gemini-2.5-flash-lite).

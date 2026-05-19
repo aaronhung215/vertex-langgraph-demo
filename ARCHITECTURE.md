@@ -71,17 +71,20 @@ flowchart TB
         Planner{{Planner<br/>JSON routing}}
         Retriever[Retriever node]
         BQExec[BQ executor<br/>allowlist + bound params]
-        Synth[Synthesizer<br/>cites doc-ids]
+        RiskExec[Risk executor<br/>spawns Go binary via MCP]
+        Synth[Synthesizer<br/>cites doc-ids + risk]
         Reflect[Reflection<br/>self-check]
         Planner -->|use_rag| Retriever
         Planner -->|use_bq| BQExec
+        Planner -->|use_risk| RiskExec
         Retriever --> Synth
         BQExec --> Synth
+        RiskExec --> Synth
         Synth --> Reflect
     end
 
     subgraph Block4["Block 4 — Go MCP tool"]
-        GoBin[risk-tool<br/>Go binary]
+        GoBin[risk-tool<br/>Go binary · MCP stdio]
         RiskFn[ScoreRisk<br/>rule-based scorer]
         GoBin --> RiskFn
     end
@@ -89,6 +92,7 @@ flowchart TB
     User --> Planner
     Retriever -.reads.-> Index
     BQExec -.queries.-> BQ
+    RiskExec -.spawns.-> GoBin
     RiskFn -.rules derived from.-> Corpus
     Reflect --> Answer([Grounded answer + citations])
 
@@ -103,6 +107,8 @@ flowchart TB
 - Block 3's retriever reads Block 2's FAISS index directly
   (`../block2/faiss_index.bin`)
 - Block 3's BQ executor queries Block 1's BigQuery table
+- Block 3's risk_executor spawns Block 4's `risk-tool` Go binary over
+  MCP stdio when `use_risk=true` — see `block3/02_agent.py:_call_risk_tool_async`
 - Block 4's Go rules trace line-for-line to Block 2's corpus
   (policy-001 / policy-003 / policy-004 / playbook-004) — same source of
   truth, different language
@@ -117,46 +123,48 @@ The LangGraph compiled in `block3/02_agent.py:271`:
 START
   │
   ▼
-┌──────────┐  emits JSON: {use_rag, use_bq, bq_args, reasoning}
+┌──────────┐  emits JSON: {use_rag, use_bq, use_risk, bq_args, risk_args, reasoning}
 │ planner  │  (gemini-2.5-flash, response_mime_type=application/json)
 └──────────┘
   │
-  ├──────────────────────┐         ← fan out (parallel)
-  ▼                      ▼
-┌───────────┐    ┌──────────────┐
-│ retriever │    │ bq_executor  │  ← BigQuery via parameterised SQL,
-│ (FAISS)   │    │ (allowlisted │     allowlisted dimensions/filters
-└───────────┘    └──────────────┘
-  │                      │
-  └──────────┬───────────┘         ← fan in (synthesizer waits for both)
-             ▼
-        ┌──────────────┐
-        │ synthesizer  │  citations: [doc-id] + "(per the data table)"
-        └──────────────┘
-             │
-             ▼
-        ┌──────────────┐
-        │ reflection   │  self-check; outputs "OK" or one-line fix
-        └──────────────┘
-             │
-             ▼
-            END
+  ├──────────────────────┬─────────────────────┐    ← fan out (parallel)
+  ▼                      ▼                     ▼
+┌───────────┐    ┌──────────────┐    ┌─────────────────┐
+│ retriever │    │ bq_executor  │    │ risk_executor   │  ← spawns Go binary
+│ (FAISS)   │    │ (allowlisted │    │ (MCP stdio →    │     over MCP stdio
+└───────────┘    │  bound SQL)  │    │  block4 risk-tool)│
+                 └──────────────┘    └─────────────────┘
+  │                      │                     │
+  └──────────────────────┴─────────┬───────────┘    ← fan in (synthesizer waits for all)
+                                   ▼
+                          ┌──────────────┐
+                          │ synthesizer  │  citations: [doc-id] + "(per the data table)" + "(per risk_score)"
+                          └──────────────┘
+                                   │
+                                   ▼
+                          ┌──────────────┐
+                          │ reflection   │  self-check; outputs "OK" or one-line fix
+                          └──────────────┘
+                                   │
+                                   ▼
+                                  END
 ```
 
 **LangGraph mechanics:**
 
-- Edges from `planner` to BOTH `retriever` and `bq_executor` ⇒ fan-out
-- LangGraph waits for both branches before invoking `synthesizer` ⇒ fan-in
+- Edges from `planner` to `retriever`, `bq_executor`, `risk_executor` ⇒ three-way fan-out
+- LangGraph waits for all three branches before invoking `synthesizer` ⇒ fan-in
 - State merge is automatic: each node returns a dict, LangGraph merges
   those dicts into `AgentState` (no manual locking, no manual merging)
 
-**Three test paths exercised by `block3/02_agent.py:DEMO_QUERIES`:**
+**Four test paths exercised by `block3/02_agent.py:DEMO_QUERIES`:**
 
-| # | Question | use_rag | use_bq |
-|---|---|---|---|
-| 1 | "What's our target unpaid rate, and how is `is_delinquent` defined?" | ✅ | ❌ |
-| 2 | "Show me delinquency rate broken down by quarter." | ❌ | ✅ |
-| 3 | "Q3 new-buyer delinquency feels high. What does the data show, and what's our SOP?" | ✅ | ✅ |
+| # | Question | use_rag | use_bq | use_risk |
+|---|---|---|---|---|
+| 1 | "What's our target unpaid rate, and how is `is_delinquent` defined?" | ✅ | ❌ | ❌ |
+| 2 | "Show me delinquency rate broken down by quarter." | ❌ | ✅ | ❌ |
+| 3 | "Q3 new-buyer delinquency feels high. What does the data show, and what's our SOP?" | ✅ | ✅ | ❌ |
+| 4 | "A first-time travel buyer with no JCIC wants to spend TWD 25,000 — score, policy, segment baseline?" | ✅ | ✅ | ✅ |
 
 ---
 
@@ -166,13 +174,15 @@ Defined at `block3/02_agent.py:96`:
 
 ```python
 class AgentState(TypedDict, total=False):
-    question:   str          # input
-    plan:       dict         # planner: {use_rag, use_bq, bq_args, reasoning}
-    retrieved:  list[dict]   # retriever: [{id, title, text, score}]
-    bq_rows:    list[dict]   # bq_executor: aggregate rows
-    bq_error:   str          # bq_executor: error path
-    draft:      str          # synthesizer: answer text
-    reflection: str          # reflection: "OK" or one-sentence critique
+    question:    str          # input
+    plan:        dict         # planner: {use_rag, use_bq, use_risk, bq_args, risk_args, reasoning}
+    retrieved:   list[dict]   # retriever: [{id, title, text, score}]
+    bq_rows:     list[dict]   # bq_executor: aggregate rows
+    bq_error:    str          # bq_executor: error path
+    risk_result: dict         # risk_executor: {score, band, decision, contributions}
+    risk_error:  str          # risk_executor: error path
+    draft:       str          # synthesizer: answer text
+    reflection:  str          # reflection: "OK" or one-sentence critique
 ```
 
 `total=False` ⇒ all fields are optional. Each node populates only its own
@@ -213,13 +223,24 @@ checks for presence before using it.
 | Safety | Two-layer defense — see [§ 7](#7-tool-safety-model) |
 | Skipped if | `use_bq=False` → returns `{}` |
 
+### risk_executor — `block3/02_agent.py:risk_executor`
+
+| Field | Value |
+|---|---|
+| Input | `question`, `plan.use_risk`, `plan.risk_args` |
+| Output | `risk_result` dict `{score, band, decision, contributions}` OR `risk_error` string |
+| Transport | MCP stdio — spawns `../block4/risk-tool` (Go binary) per call (~200ms incl. subprocess start) |
+| Cross-language | Python orchestrator → Go binary → JSON response back. The schema is self-describing via MCP `tools/list`, so the planner could in principle discover the tool at runtime; here it's hard-coded in the planner prompt for simplicity |
+| Skipped if | `use_risk=False` → returns `{}` |
+| Fail-soft | If the Go binary isn't built (`block4/risk-tool` missing), returns a `risk_error` with a build instruction instead of crashing the graph |
+
 ### synthesizer — `block3/02_agent.py:216`
 
 | Field | Value |
 |---|---|
-| Input | `question` + `retrieved` + `bq_rows` (or `bq_error`) |
-| Output | `draft` — answer text with `[doc-id]` citations and "(per the data table)" for numeric claims |
-| Waits for | Both retriever AND bq_executor (LangGraph fan-in) |
+| Input | `question` + `retrieved` + `bq_rows` (or `bq_error`) + `risk_result` (or `risk_error`) |
+| Output | `draft` — answer text with `[doc-id]` citations, "(per the data table)" for numeric claims, "(per risk_score)" for risk scorer outputs |
+| Waits for | All three of retriever, bq_executor, risk_executor (LangGraph fan-in) |
 
 ### reflection — `block3/02_agent.py:252`
 
@@ -501,11 +522,13 @@ over Cloud Run (5b). The trace tree gives the observability story
 without needing a public URL that a recruiter likely wouldn't click.
 Will revisit before the Google Cloud AI Engineer submission.
 
-### Block 4 not wired into Block 3 graph
+### Block 4 integration into Block 3 — DONE
 
-The Go MCP tool stands alone — Block 3's planner doesn't currently route
-to it. The integration path is documented in
-`block4/README.md#how-block-3-could-integrate-this` (add a `risk_executor`
-node alongside `bq_executor`, add `use_risk` to the planner schema).
-Skipped for scope; the cross-language story is already proven by the tool
-existing and running independently.
+The Go MCP tool is now a routed branch of the agent graph. See
+`risk_executor` in [§ 5](#5-per-node-responsibilities), the `use_risk`
+edge in [§ 3](#3-agent-state-graph), and the cross-block "spawns" edge
+in the Mermaid map at [§ 2](#2-component-map). The 4th demo query in
+`block3/02_agent.py:DEMO_QUERIES` exercises all three tools in parallel.
+A zero-LLM smoke test (`PROJECT_ID=dummy python -c "...
+_call_risk_tool_sync({...})..."`) confirms the MCP path works at the
+protocol level without needing Gemini credits.
