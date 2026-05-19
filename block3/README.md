@@ -50,13 +50,16 @@ repo-level single source of truth. Sections most relevant to Block 3:
 - [§ 7 Tool safety model](../ARCHITECTURE.md#7-tool-safety-model) (BQ allowlist + parameter binding)
 - [§ 9 Design decisions](../ARCHITECTURE.md#9-design-decisions)
 
-The three demo queries triggering three different tool paths:
+The four demo queries triggering four different tool-path combinations:
 
-| # | Question | use_rag | use_bq |
-|---|---|---|---|
-| 1 | "What's our target unpaid rate, and how is is_delinquent defined?" | ✅ | ❌ |
-| 2 | "Show me delinquency rate broken down by quarter." | ❌ | ✅ |
-| 3 | "Q3 new-buyer delinquency feels high. What does the data show, and what's our SOP?" | ✅ | ✅ |
+| # | Question | use_rag | use_bq | use_risk |
+|---|---|---|---|---|
+| 1 | "What's our target unpaid rate, and how is is_delinquent defined?" | ✅ | ❌ | ❌ |
+| 2 | "Show me delinquency rate broken down by quarter." | ❌ | ✅ | ❌ |
+| 3 | "Q3 new-buyer delinquency feels high. What does the data show, and what's our SOP?" | ✅ | ✅ | ❌ |
+| 4 | "A first-time travel buyer with no JCIC for TWD 25,000 — score, policy, segment baseline?" | ✅ | ✅ | ✅ |
+
+Query 4 exercises the **cross-language tool boundary**: the planner emits `use_risk=true`, the `risk_executor` node spawns `../block4/risk-tool` (Go binary) over MCP stdio, the score comes back, and the synthesizer composes one answer combining doc citations + BQ table + risk decision.
 
 ---
 

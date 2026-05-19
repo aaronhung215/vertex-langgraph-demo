@@ -20,6 +20,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -32,6 +33,8 @@ from google import genai
 from google.genai import types as gtypes
 from langgraph.graph import END, START, StateGraph
 from langsmith import traceable
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from sentence_transformers import SentenceTransformer
 
 # Local import: the BQ tool from step 1 sits next to this file.
@@ -42,6 +45,9 @@ bq_tool = import_module("01_bq_tool")
 delinquency_breakdown = bq_tool.delinquency_breakdown
 format_as_table = bq_tool.format_as_table
 ToolInputError = bq_tool.ToolInputError
+
+# Block 4 Go MCP risk-scoring binary. Built once via `cd block4 && go build -o risk-tool .`.
+RISK_BINARY = Path(__file__).parent.parent / "block4" / "risk-tool"
 
 PROJECT_ID = os.environ.get("PROJECT_ID")
 REGION = os.environ.get("GCP_REGION", "us-central1")
@@ -99,8 +105,29 @@ class AgentState(TypedDict, total=False):
     retrieved: list[dict]
     bq_rows: list[dict]
     bq_error: str
+    risk_result: dict
+    risk_error: str
     draft: str
     reflection: str
+
+
+# ----- Block 4 risk tool client (spawns Go binary per call over MCP stdio) --
+
+async def _call_risk_tool_async(args: dict) -> dict:
+    """Spawn the Go MCP server (block4/risk-tool), call risk_score, return
+    the parsed JSON. ~200ms per call including subprocess start."""
+    params = StdioServerParameters(command=str(RISK_BINARY))
+    async with stdio_client(params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("risk_score", args)
+            return json.loads(result.content[0].text)
+
+
+def _call_risk_tool_sync(args: dict) -> dict:
+    """Sync wrapper around _call_risk_tool_async. LangGraph 1.x nodes are
+    sync by default; asyncio.run() spawns + tears down a loop per call."""
+    return asyncio.run(_call_risk_tool_async(args))
 
 
 # ----- LLM client (lazy) --------------------------------------------------
@@ -134,28 +161,52 @@ def _gen(prompt: str, *, json_mode: bool = False, max_tokens: int = 600) -> str:
 
 PLANNER_PROMPT = """You route a FinTech analyst's question to the right tools.
 
-Two tools available:
-1. retrieve_docs — searches internal policy/data-dictionary/playbook docs.
+Three tools available:
+1. retrieve_docs — searches internal policy / dict / playbook docs.
    Use for: definitions, policies, processes, "what is X", "how do we do Y".
-2. query_bigquery — aggregations on customer_transactions.
+2. query_bigquery — aggregations on customer_transactions (population stats).
    Columns: customer_id, transaction_date, quarter (Q1-Q4), is_new_buyer (bool),
    merchant_segment (travel/gaming/retail), order_value_twd, is_delinquent,
    days_late, credit_limit_twd, device_type (ios/android/web).
    Use for: "show me the rate", "compare X vs Y", "which segment has...".
+3. risk_score — rule-based credit-risk scorer for a specific hypothetical
+   applicant (Go MCP tool — returns score 0-1, band low/medium/high,
+   decision approve/review/decline, and per-rule contributions citing
+   the policy docs the rule came from).
+   Use for: "should we approve/decline a buyer who has X, Y, Z?",
+   "what's the risk for a customer ordering ... in segment ...?".
 
-Both tools can be used together for analytical questions that need policy
-context AND numbers.
+Any combination of the three can be used together. Common pattern: use
+risk_score for an individual applicant AND query_bigquery for the
+segment's historical baseline, so the analyst can compare individual
+vs cohort.
 
 Output STRICT JSON only:
 {
   "use_rag": bool,
   "use_bq": bool,
+  "use_risk": bool,
   "bq_args": {"group_by": [...], "filters": {...}} or null,
+  "risk_args": {"merchant_segment": "travel|gaming|retail",
+                "is_new_buyer": bool, "order_value_twd": int,
+                "has_jcic": bool} or null,
   "reasoning": "one short sentence"
 }
 
-bq_args.group_by must be subset of ["quarter","is_new_buyer","merchant_segment","device_type"]
-bq_args.filters keys must be from the same set.
+CONSTRAINTS — do not break these:
+- bq_args.group_by must be a NON-EMPTY subset of
+  ["quarter","is_new_buyer","merchant_segment","device_type"]
+- bq_args.filters keys must come from the same four-dimension set
+- `is_delinquent` is the OUTCOME the BQ tool aggregates into
+  delinquency_pct. NEVER include `is_delinquent` in group_by OR filters
+- When the analyst asks "delinquency rate of X", group_by by X's
+  dimension(s), do NOT filter by is_delinquent
+- If use_risk=true, ALL four risk_args fields are required
+  (merchant_segment, is_new_buyer, order_value_twd, has_jcic)
+- BQ is for cohort-level history. risk_score is for one hypothetical
+  individual. Do NOT use BQ when the question is about a single
+  applicant; do NOT use risk_score when the question is about
+  aggregate rates across customers
 
 QUESTION: {question}
 """
@@ -195,10 +246,39 @@ def bq_executor(state: AgentState) -> dict:
         return {"bq_error": f"{type(e).__name__}: {e}"}
 
 
+def risk_executor(state: AgentState) -> dict:
+    """Spawn block4/risk-tool over MCP stdio, call risk_score, parse JSON.
+    Cross-language tool call: Python orchestrator → Go binary → back."""
+    plan = state.get("plan", {})
+    if not plan.get("use_risk"):
+        return {}
+    if not RISK_BINARY.exists():
+        return {"risk_error": f"binary not found at {RISK_BINARY} — "
+                              "run: cd block4 && go build -o risk-tool ."}
+    args = plan.get("risk_args") or {}
+    try:
+        return {"risk_result": _call_risk_tool_sync(args)}
+    except Exception as e:  # noqa: BLE001
+        return {"risk_error": f"{type(e).__name__}: {e}"}
+
+
+def _format_risk(result: dict) -> str:
+    """Render the risk_score tool's JSON output for prompt + reflection."""
+    lines = [
+        f"score={result.get('score', '?')} "
+        f"band={result.get('band', '?')} "
+        f"decision={result.get('decision', '?')}",
+        "contributions:",
+    ]
+    for c in result.get("contributions", []):
+        lines.append(f"  - {c}")
+    return "\n".join(lines)
+
+
 SYNTH_PROMPT = """You answer a FinTech analyst's question using ONLY the evidence below.
 
 Rules:
-- Cite policy docs inline with [doc-id]. Cite numeric claims with "(per the data table)".
+- Cite policy docs inline with [doc-id]. Cite numeric claims with "(per the data table)". Cite the risk scorer with "(per risk_score)".
 - If evidence is insufficient, say so explicitly.
 - Be concise (3-5 sentences typically; can be longer for analytical questions).
 
@@ -207,6 +287,9 @@ DOCS:
 
 DATA (BigQuery aggregate):
 {data}
+
+RISK SCORE (Go MCP tool):
+{risk}
 
 QUESTION: {question}
 
@@ -224,10 +307,16 @@ def synthesizer(state: AgentState) -> dict:
         data_block = f"(tool error: {state['bq_error']})"
     elif state.get("bq_rows"):
         data_block = format_as_table(state["bq_rows"])
+    risk_block = "(no scoring run)"
+    if state.get("risk_error"):
+        risk_block = f"(tool error: {state['risk_error']})"
+    elif state.get("risk_result"):
+        risk_block = _format_risk(state["risk_result"])
     prompt = (
         SYNTH_PROMPT
         .replace("{docs}", docs_block)
         .replace("{data}", data_block)
+        .replace("{risk}", risk_block)
         .replace("{question}", state["question"])
     )
     return {"draft": _gen(prompt, max_tokens=800)}
@@ -257,6 +346,8 @@ def reflection(state: AgentState) -> dict:
         ))
     if state.get("bq_rows"):
         evidence_parts.append("DATA:\n" + format_as_table(state["bq_rows"]))
+    if state.get("risk_result"):
+        evidence_parts.append("RISK:\n" + _format_risk(state["risk_result"]))
     evidence = "\n\n".join(evidence_parts) or "(none)"
     prompt = (
         REFLECT_PROMPT
@@ -273,15 +364,18 @@ def build_graph():
     g.add_node("planner", planner)
     g.add_node("retriever", retriever)
     g.add_node("bq_executor", bq_executor)
+    g.add_node("risk_executor", risk_executor)
     g.add_node("synthesizer", synthesizer)
     g.add_node("reflection", reflection)
     g.add_edge(START, "planner")
-    # Fan out: planner -> retriever AND bq_executor (parallel)
+    # Fan out: planner -> retriever, bq_executor, risk_executor (parallel)
     g.add_edge("planner", "retriever")
     g.add_edge("planner", "bq_executor")
-    # Fan in: both feed synthesizer (LangGraph waits for both)
+    g.add_edge("planner", "risk_executor")
+    # Fan in: all three feed synthesizer (LangGraph waits for all branches)
     g.add_edge("retriever", "synthesizer")
     g.add_edge("bq_executor", "synthesizer")
+    g.add_edge("risk_executor", "synthesizer")
     g.add_edge("synthesizer", "reflection")
     g.add_edge("reflection", END)
     return g.compile()
@@ -294,9 +388,13 @@ DEMO_QUERIES = [
     "What is our target unpaid rate, and how is is_delinquent defined?",
     # BQ-only
     "Show me delinquency rate broken down by quarter.",
-    # Both — the centerpiece narrative
+    # RAG + BQ (cohort question with policy context)
     "Q3 new-buyer delinquency feels high. What does the data actually show, "
     "and what's our standard SOP for investigating a quarterly spike?",
+    # RAG + BQ + Risk (individual applicant compared against cohort + policy)
+    "A first-time travel buyer with no JCIC record wants to spend TWD 25,000. "
+    "What's the credit-risk score, what does our travel-segment policy say, "
+    "and how does the segment's historical delinquency compare?",
 ]
 
 
@@ -304,8 +402,11 @@ def print_run(i: int, question: str, final_state: dict) -> None:
     sep = "=" * 78
     print(f"\n{sep}\nQ{i}: {question}\n{sep}")
     plan = final_state.get("plan", {})
-    print(f"PLAN  use_rag={plan.get('use_rag')}  use_bq={plan.get('use_bq')}"
-          f"  bq_args={plan.get('bq_args')}")
+    print(f"PLAN  use_rag={plan.get('use_rag')}  "
+          f"use_bq={plan.get('use_bq')}  "
+          f"use_risk={plan.get('use_risk')}")
+    print(f"      bq_args={plan.get('bq_args')}")
+    print(f"      risk_args={plan.get('risk_args')}")
     print(f"      reasoning: {plan.get('reasoning')}")
     if final_state.get("retrieved"):
         print("RETRIEVED:")
@@ -316,23 +417,31 @@ def print_run(i: int, question: str, final_state: dict) -> None:
         print(format_as_table(final_state["bq_rows"]))
     if final_state.get("bq_error"):
         print(f"BQ ERROR: {final_state['bq_error']}")
+    if final_state.get("risk_result"):
+        print("RISK SCORE:")
+        print(_format_risk(final_state["risk_result"]))
+    if final_state.get("risk_error"):
+        print(f"RISK ERROR: {final_state['risk_error']}")
     print(f"\nDRAFT:\n  {final_state.get('draft','').strip()}")
     print(f"\nREFLECTION: {final_state.get('reflection','').strip()}")
 
 
 def main() -> None:
     graph = build_graph()
-    print("Compiled LangGraph: planner -> (retriever || bq_executor) -> synthesizer -> reflection")
+    print("Compiled LangGraph: planner -> "
+          "(retriever || bq_executor || risk_executor) -> "
+          "synthesizer -> reflection")
     for i, q in enumerate(DEMO_QUERIES, 1):
         final = graph.invoke({"question": q})
         print_run(i, q, final)
     print("\n" + "=" * 78)
     print("BLOCK 3 COMPLETE ✅")
-    print(f"  Agent: LangGraph state machine with 5 nodes (1 planner, 2 parallel tools, "
-          "1 synth, 1 reflection)")
+    print(f"  Agent: LangGraph state machine with 6 nodes "
+          "(1 planner, 3 parallel tools, 1 synth, 1 reflection)")
     print(f"  LLM:   {MODEL} via google-genai")
-    print(f"  Tools: FAISS RAG (from Block 2) + parameterised BigQuery aggregator")
-    print("Next: Block 4 (Go MCP tool ~100 lines)")
+    print(f"  Tools: FAISS RAG (Block 2) + BigQuery aggregator (Block 3) + "
+          "Go MCP risk_score (Block 4)")
+    print("Cross-language: Python orchestrator spawns Go binary over MCP stdio")
 
 
 if __name__ == "__main__":
