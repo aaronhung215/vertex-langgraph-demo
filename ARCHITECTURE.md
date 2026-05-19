@@ -438,7 +438,7 @@ retrieved documents. The aggregate report flags this as a per-path
 slice (see `scores_aggregate.json`); faithfulness and
 answer_relevancy remain meaningful for all 20 questions.
 
-### First-run results (2026-05-18)
+### First-run results (2026-05-18, judge = flash thinking-on — superseded)
 
 | Metric | All (n=20) | rag_only (6) | bq_only (6) | both (8) |
 |---|---|---|---|---|
@@ -446,6 +446,12 @@ answer_relevancy remain meaningful for all 20 questions.
 | answer_relevancy | 0.730 | 0.864 | 0.883 | **0.515** |
 | context_precision | 0.857 | 0.972 | 0.833 | 0.788 |
 | context_recall | 0.423 | 0.328 | 0.250 | 0.625 |
+
+This pass cost **USD ~13** because the Ragas judge ran with thinking
+ON by default. The judge model has since been swapped to
+`gemini-2.5-flash-lite`; expect these numbers to shift on a re-run,
+since a different judge is a different rater. Full breakdown in
+[`eval/README.md` Cost post-mortem](./eval/README.md#cost-post-mortem).
 
 **Real planner regression surfaced** (5 of 20 cases): the planner
 sometimes emits `filters: {is_delinquent: True}` — but `is_delinquent`

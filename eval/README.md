@@ -64,8 +64,11 @@ python 01_run_agent.py
 python 02_score_ragas.py
 ```
 
-Total cost: ~USD 0.04 for one full pass (200 Gemini-flash calls,
-generously). Embeddings are local, no API call.
+**Expected cost** (after the thinking-token fix, judge = `gemini-2.5-flash-lite`): ~USD 0.50 per full pass, untested at the time of writing — verify with a `head -3 testset.jsonl > sample.jsonl` dry-run before committing to all 20 questions.
+
+**First-run cost** (judge = `gemini-2.5-flash`, thinking default ON):
+~USD 13. Thinking-token output alone billed $11.23. The script has been
+patched; this paragraph kept as the receipt. See [Cost post-mortem](#cost-post-mortem) below.
 
 ---
 
@@ -88,7 +91,7 @@ recall analysis.
 
 ---
 
-## First-run results (2026-05-18)
+## First-run results (2026-05-18, judge = flash with thinking ON — superseded)
 
 | Metric | All (n=20) | rag_only (n=6) | bq_only (n=6) | both (n=8) |
 |---|---|---|---|---|
@@ -97,7 +100,7 @@ recall analysis.
 | context_precision | 0.857 | 0.972 | 0.833 | 0.788 |
 | context_recall | 0.423 | 0.328 | 0.250 | 0.625 |
 
-Wall-clock: ~108s (agent runs) + ~92s (Ragas judging). Cost: ~USD 0.04.
+Wall-clock: ~108s (agent runs) + ~92s (Ragas judging). **Cost: USD ~13** (see post-mortem). The judge model has since been changed to `gemini-2.5-flash-lite`; expect these absolute numbers to shift on a re-run — comparisons across runs only mean something if the judge is held constant.
 
 ### What the eval surfaced — real planner regression
 
@@ -202,3 +205,54 @@ to both.
 - **Stratified sampling beyond expected_path** — 20 questions is enough
   to spot the obvious failure modes; production scale would want 200+
   with stratification across segment / quarter / question difficulty
+
+---
+
+## Cost post-mortem
+
+The first end-to-end run cost **USD ~13** (Vertex AI line item),
+against an estimate of USD 0.04. Breakdown from the GCP billing SKU
+report on 2026-05-18:
+
+| SKU | $ | Note |
+|---|---|---|
+| Gemini 2.5 Flash GA Thinking Text Output | **8.90** | Reasoning tokens — invisible in the response, billed separately |
+| Gemini 2.5 Flash GA Text Output (Thinking On) | **2.33** | The reply tokens themselves, billed at the thinking-on rate |
+| Gemini 2.5 Flash GA Text Input | 1.41 | Input tokens (all calls) |
+| Gemini 2.5 Flash GA Text Output (no thinking) | 0.44 | The agent's own LLM calls — `block3/02_agent.py` correctly set `thinking_budget=0` |
+
+**Root cause**: the Block 3 agent's `_gen()` explicitly sets
+`thinking_config=ThinkingConfig(thinking_budget=0)` (added in Block 2
+after a related token-budget bug). The Ragas judge configured here used
+the LangChain `ChatVertexAI` wrapper which had **no equivalent setting
+plumbed through**, so every Ragas judge call (claim verification,
+question regeneration, context relevance check — easily 200+ underlying
+LLM calls across the four metrics × 20 questions) ran with thinking ON.
+Thinking output is priced ~25× regular output on `gemini-2.5-flash`,
+so what looked like ~80 progress-bar iterations was really ~140K
+thinking-output tokens behind the scenes.
+
+**Fix (this PR)**: switched the judge model to `gemini-2.5-flash-lite`,
+which does not enable thinking by default. No `thinking_config`
+plumbing needed; the failure mode is structurally removed rather than
+remembered-to-avoid.
+
+**Predicted cost after fix**: ~USD 0.50 per full pass, untested at the
+time of writing. Verify by running with a 3-question sample first:
+
+```bash
+head -3 eval/testset.jsonl > eval/testset.sample.jsonl
+# Patch run_agent.py to point at sample, run, multiply by 7 to estimate
+# the full-testset cost. Decide whether to proceed.
+```
+
+**Lessons codified into the codebase**:
+
+- Cost claims in `README.md` and `ARCHITECTURE.md` updated from
+  "USD 0.04 / pass" to the actual receipt plus the post-fix estimate
+  (marked "untested")
+- Future LLM judge / agent additions: any `gemini-2.5-*` (non-lite) call
+  must explicitly set `thinking_budget` or pick a `-lite` variant —
+  defaults are not your friend
+- "Run a 3-row sample first" is now the standard for any new pipeline
+  that touches a paid LLM in a loop
