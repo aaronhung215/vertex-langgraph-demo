@@ -53,8 +53,11 @@ PROJECT_ID = os.environ.get("PROJECT_ID")
 REGION = os.environ.get("GCP_REGION", "us-central1")
 MODEL = "gemini-2.5-flash"
 
-if not PROJECT_ID:
-    raise SystemExit('Set: export PROJECT_ID="your-project-id"')
+# PROJECT_ID is checked lazily inside _llm() (Gemini client init), not at
+# module load. This lets import-time tooling — including the Go MCP smoke
+# test for risk_executor — exercise the non-LLM code paths without needing
+# a real GCP project set. Any Gemini-touching code path still fails fast
+# with the same error message.
 
 # ----- Retrieval (re-uses Block 2 artifacts) -----------------------------
 BLOCK2 = Path(__file__).parent.parent / "block2"
@@ -138,6 +141,8 @@ _client: genai.Client | None = None
 def _llm() -> genai.Client:
     global _client
     if _client is None:
+        if not PROJECT_ID:
+            raise SystemExit('Set: export PROJECT_ID="your-gcp-project"')
         _client = genai.Client(vertexai=True, project=PROJECT_ID, location=REGION)
     return _client
 
